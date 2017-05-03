@@ -112,7 +112,6 @@ calculateB(
     }
 #endif
 
-
     S1p = cneg(csqrt(subr(rmul(PI4,radd(+rhoB(L,0), rhoN(L,0))), E0)));
     S3p = cneg(csqrt(subr(rmul(PI4,radd(-rhoB(L,0), rhoN(L,0))), E0)));
     S1n = cneg(csqrt(subr(rmul(PI4,radd(+rhoB(L,1), rhoN(L,1))), E0)));
