@@ -31,14 +31,17 @@ class CPU_Calculator:
         self.fn = lib.magneticR
         self.Nlayers = 0
 
-    def __call__(self, kz, dz, rhoN, bx, by, bz, AGUIDE):
+    def __call__(self, kz, dz, rhoN, bx, by, bz, Aguide):
         Nlayers = len(dz)
         Nkz = kz.size
         self.allocate_B(Nlayers)
-        L = layer_data(dz, rhoN, bx, by, bz, AGUIDE, dtype=rdouble)
+        L = layer_data(dz, rhoN, bx, by, bz, Aguide, dtype=rdouble)
         #print "L:",L
         Rp = np.empty((kz.size,4), dtype=cdouble)
         Rm = np.empty((kz.size,4), dtype=cdouble)
+        #print "="*20
+        #print "dwba on cpu"
+        #print "="*20
         self.fn(1.0, Nkz, Nlayers, kz, L, self.B, Rp)
         self.fn(-1.0, Nkz, Nlayers, kz, L, self.B, Rm)
         Rp[:,2:] = Rm[:,2:]
@@ -78,15 +81,19 @@ class GPU_Calculator:
         self.Nlayers = 0
         self.buffers = []
 
-    def __call__(self, kz, dz, rhoN, bx, by, bz, AGUIDE):
+    def __call__(self, kz, dz, rhoN, bx, by, bz, Aguide):
         import pyopencl as cl
         T = self.T
 
         self.allocate_buffers(len(dz), kz.size)
         gkz, gL, gB, gR = self.buffers
         kz = np.ascontiguousarray(kz, dtype=T.real)
-        L = layer_data(dz, rhoN, bx, by, bz, AGUIDE, dtype=T.real)
-        #print "L: ",L
+        L = layer_data(dz, rhoN, bx, by, bz, Aguide, dtype=T.real)
+        #print "dz",L[:,3].imag
+        #print "rhoN",L[:,0]
+        #print "beta",L[:,1]
+        #print "gamma",L[:,2]
+        #print "rhoB",L[:,3].real
         if 1:
             cl.enqueue_copy(self.queue, gL, L, is_blocking=False)
             cl.enqueue_copy(self.queue, gkz, kz, is_blocking=False)
@@ -101,6 +108,7 @@ class GPU_Calculator:
         Rp = self._calculate_R(1.0)
         Rm = self._calculate_R(-1.0)
         Rp[:,2:] = Rm[:,2:]
+        #print Rp[-8:,:]
         return Rp.T
 
     def _calculate_R(self, spin):
@@ -153,6 +161,7 @@ class GPU_Calculator:
         Returns the number of kz values that should by scheduled together and
         the temporary B matrix that can be used for the kernel.
         """
+        #raise ValueError("fails for Nkz not a multiple of 8 on mac")
         if self.Nlayers < Nlayers or self.Nkz < Nkz:
             import pyopencl as cl
             from pyopencl import mem_flags as mf
@@ -185,20 +194,31 @@ class GPU_Calculator:
 
 
 
-def layer_data(dz, rhoN, bx, by, bz, AGUIDE, dtype=rdouble):
-    # rotate bx,by,bz
-    bx, by, bz = rotateYZ(bx, by, bz, AGUIDE)
-    #rhoB, u1, u3 = rhoB_u1_u3(bx, by, bz)
-    rhoB, u1, u3 = calculateU(bx, by, bz)
+def layer_data(dz, rhoN, bx, by, bz, Aguide, dtype=rdouble):
+    print "Aguide", Aguide
+    print "d", dz
+    print "rho", rhoN.real
+    print "bx", bx
+    print "by", by
+    print "bz", bz
+    bx, by, bz = rotateYZ(bx, by, bz, Aguide)
+    print "bx", bx
+    print "by", by
+    print "bz", bz
+    rhoB, beta, gamma = rhoB_beta_gamma(bx, by, bz)
+    print "beta", beta
+    print "gamma", gamma
+
     dtype = cdouble if np.dtype(dtype) == rdouble else cfloat
     L = np.empty((len(rhoN),4), dtype=dtype)
-    L[:,0] = rhoN
-    L[:,1] = u1
-    L[:,2] = u3
+    L[:,0] = rhoN + -1e-12j  # force some absorption to exist
+    L[:,1] = beta
+    L[:,2] = gamma
     L[:,3] = rhoB + 1j*dz
     return L
 
 def rhoB_u1_u3(bx, by, bz):
+    raise Exception("switched to beta/gamma repn")
     # precompute rhoB, u1, u3, independent of kz
     b_tot = sqrt(bx**2 + by**2 + bz**2)
     b_nz = (b_tot != 0)
@@ -209,7 +229,7 @@ def rhoB_u1_u3(bx, by, bz):
     rhoB = B2SLD * b_tot
     return rhoB, u1, u3
 
-def calculateU(bx, by, bz):
+def rhoB_beta_gamma(bx, by, bz):
     # precompute rhoB, u1, u3, independent of kz
     b_tot = sqrt(bx**2 + by**2 + bz**2)
     b_nz = (b_tot != 0)
@@ -221,30 +241,32 @@ def calculateU(bx, by, bz):
     #return rhoB, u1, u3
 
     Bn,Gn = u1, 1/u3
+    #print "beta",Bn
+    #print "gamma",Gn
 
     #b_reverse = b_nz & (abs(u1)<=1.0)
     #rhoB[b_reverse] = -rhoB[b_reverse]
     #Bn[b_reverse],Gn[b_reverse] = u3[b_reverse],1/u1[b_reverse]
 
-    return rhoB, Bn,Gn
+    return rhoB, Bn, Gn
 
 
-def rotateYZ(bx, by, bz, AGUIDE):
+def rotateYZ(bx, by, bz, Aguide):
     # get B in lab frame, from sample frame
-    C = cos(radians(AGUIDE))
-    S = sin(radians(AGUIDE))
+    C = cos(radians(Aguide))
+    S = sin(radians(Aguide))
     bxr = bx
     byr = bz * S + by * C
     bzr = bz * C - by * S
     return bxr, byr, bzr
 
-def plot(kz, R):
+def plot(kz, R, **kw):
     import pylab
     rpp, rpm, rmp, rmm = R
-    pylab.plot(2*kz, abs(rpp)**2, label="r++")
-    pylab.plot(2*kz, abs(rmp)**2, label="r-+", hold=True)
-    pylab.plot(2*kz, abs(rpm)**2, label="r+-", hold=True)
-    pylab.plot(2*kz, abs(rmm)**2, label="r--", hold=True)
+    pylab.plot(2*kz, abs(rpp)**2, label="r++", **kw)
+    pylab.plot(2*kz, abs(rmp)**2, label="r-+", hold=True, **kw)
+    pylab.plot(2*kz, abs(rpm)**2, label="r+-", hold=True, **kw)
+    pylab.plot(2*kz, abs(rmm)**2, label="r--", hold=True, **kw)
     pylab.yscale('log')
     pylab.legend()
 
@@ -260,16 +282,17 @@ def _afm_model():
     by =   np.array([0.0, 1.0, 0.0, -1.0, 0.0, 1.0, 0.0, 0.0])
     bx =   np.array([0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0])
     bz =   np.array([0.0, 0.0, 0.0,  0.0, 0.0, 0.0, 0.0, 0.0])
-    return dz, rhoN, bx, by, bz
+    Aguide = 270.
+    return dz, rhoN, bx, by, bz, Aguide
 
 def _Yaohua_model(H=0.4):
     """
     layers = [
         # depth rho rhoM thetaM phiM
-        [ 0, 0.0, rhoB, 90, 0.0],
+        [   0, 0.0, rhoB,       90, 0.0],
         [ 200, 4.0, rhoB + 1.0, np.degrees(np.arctan2(rhoB, 1.0)), 0.0],
         [ 200, 2.0, rhoB + 1.0, 90, 0.0],
-        [ 0, 4.0, rhoB, 90 , 0.0],
+        [   0, 4.0, rhoB,       90, 0.0],
         ]
     """
     B2SLD = 2.31929 # *1e-6
@@ -280,9 +303,11 @@ def _Yaohua_model(H=0.4):
     by =   np.array([        H,             H, (1.0/B2SLD)+H,         H])
     bx =   np.array([      0.0,     1.0/B2SLD,           0.0,       0.0])
     bz =   np.array([      0.0,           0.0,           0.0,       0.0])
-    return dz, rhoN, bx, by, bz
+    #Aguide = 270.
+    Aguide = 300.
+    return dz, rhoN, bx, by, bz, Aguide
 
-def _random_model(Nlayers=200, H=0.4, seed=1):
+def _random_model(Nlayers=200, H=0.4, seed=None):
     if seed is None: seed = np.random.randint(1000000)
     print "Seed:",seed
     np.random.seed(seed)
@@ -292,41 +317,87 @@ def _random_model(Nlayers=200, H=0.4, seed=1):
     bx = np.random.rand(Nlayers)*0.1
     bx[0] = bx[-1] = 0
     bz = np.zeros_like(dz)
-    return dz, rhoN, bx, by, bz
+    Aguide = np.random.rand()*360.
+    #Aguide = 270
+    return dz, rhoN, bx, by, bz, Aguide
 
-def _demo(model, reversed=False, rotated=True, cpu=False, dtype='f'):
+def _run_model(model, kz, reversed=False, rotated=True, cpu=False, dtype='f'):
     import time
-    dz, rhoN, bx, by, bz = model
-    kz = np.linspace(0.0001, 0.0151, 201)
-    AGUIDE = 270.0 # 90.0 would be along y
+    dz, rhoN, bx, by, bz, Aguide = model
     if not rotated:
-        AGUIDE = 0.0
+        Aguide = 0.0
         bx,by,bz = bz+EPSILON,bx,by
         #bx,by,bz = bz,bx,by
     if reversed:
         kz = -kz
         dz, rhoN, bx, by, bz = [v[::-1] for v in dz, rhoN, bx, by, bz]
     calculator = CPU_Calculator() if cpu else GPU_Calculator(dtype)
+    dz, rhoN, bx, by, bz = [np.asarray(v) for v in (dz, rhoN, bx, by, bz)]
+    rhoN = rhoN - 1e-12j
     #N=30
     N=1
     t0 = time.time()
     for i in range(N):
-       R = calculator(kz, dz, rhoN, bx, by, bz, AGUIDE)
+       R = calculator(kz, dz, rhoN, bx, by, bz, Aguide)
     print "done with time = %g" % ((time.time() - t0)/N)
-    return abs(kz), R
+    return R
 
-if __name__ == '__main__':
+def _refl1d_model(model, kz):
+    from refl1d import reflmodule
+    d, rho, bx, by, bz, Aguide = model
+    rho = np.asarray(rho)
+    irho = np.zeros(len(rho))
+    sigma = np.zeros(len(rho)-1)
+
+    print "Aguide", Aguide
+    print "d", d
+    print "rho", rho
+    print "bx", bx
+    print "by", by
+    print "bz", bz
+    bx, by, bz = rotateYZ(bx, by, bz, Aguide)
+    print "bx", bx
+    print "by", by
+    print "bz", bz
+    rhoB, beta, gamma = rhoB_beta_gamma(bx, by, bz)
+    print "beta", beta
+    print "gamma", gamma
+    rho_index = np.zeros(kz.shape, 'i')
+    R = [np.empty(len(kz), 'D') for pol in (1,2,3,4)]
+    rho, irho, rhoB = [v*1e6 for v in rho, irho, rhoB]
+    irho += 1e-6  # force absorption to exist
+    reflmodule._magnetic_amplitude(d, sigma, rho, irho, rhoB, beta, gamma,
+                                   Aguide, kz, rho_index, *R)
+    return R
+
+
+def demo():
+    import pylab
     import sys
     rotated = "unrotated" not in sys.argv
     reversed = "reversed" in sys.argv
     cpu = "cpu" in sys.argv
     dtype = "d" if "double" in sys.argv else "f"
     #model = _afm_model()
-    model = _Yaohua_model(H=0.4)
+    #model = _Yaohua_model(H=0.4)
     #model = _random_model(Nlayers=4000, H=0.4, seed=10248)
+    model = _random_model(Nlayers=40, H=0.4, seed=None)
     #for p,v in zip("dz Nr bx by bz".split(), model): print p,v
-    kz,R = _demo(model, reversed=reversed, rotated=rotated, cpu=cpu, dtype=dtype)
-    #print kz[0:3],R[:,0:3]
-    plot(kz,R); import pylab; pylab.show()
+
+    kz = np.linspace(0.001, 0.0301, 208)
+    if 1:
+        R = _run_model(model, kz, reversed=reversed, rotated=rotated, cpu=cpu, dtype=dtype)
+        #print kz[0:3],R[:,0:3]
+        plot(kz,R)
+        #pylab.yscale('linear')
+
+    if 1:
+        R = _refl1d_model(model, kz)
+        plot(kz, R, linestyle='dashed')
+
+    #pylab.yscale('linear')
+    pylab.show()
 
 
+if __name__ == '__main__':
+    demo()

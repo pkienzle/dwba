@@ -74,6 +74,8 @@ inline cdouble  cmul(const cdouble a, const cdouble b) {
 
 inline cdouble radd(const double a, const cdouble b) { return cplx( a+b.x, b.y );  }
 inline cdouble rsub(const double a, const cdouble b) { return cplx( a-b.x, -b.y ); }
+inline cdouble addr(const cdouble a, const double b) { return cplx( a.x+b, a.y );  }
+inline cdouble subr(const cdouble a, const double b) { return cplx( a.x-b, a.y ); }
 
 
 #if 1   // Simple calculation
